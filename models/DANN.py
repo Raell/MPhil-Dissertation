@@ -170,6 +170,8 @@ class DANNModel(SingleDomainModel):
 
         current_patience = patience
 
+        history = {}
+
         # Perform training over number of epochs
         for i in range(max_epochs):
             self.train()
@@ -236,12 +238,31 @@ class DANNModel(SingleDomainModel):
                 for k, v in batch_acc.items():
                     acc_metrics[k] += v
 
-            loss_metrics = {k: v / train_size for k, v in loss_metrics.items()}
-            for k, v in acc_metrics.items():
-                if k == "dis_acc":
-                    acc_metrics[k] = v / train_size
-                else:
-                    acc_metrics[k] = v / labelled_size
+            # loss_metrics = {k: v / train_size for k, v in loss_metrics.items()}
+            # for k, v in acc_metrics.items():
+            #     if k == "dis_acc":
+            #         acc_metrics[k] = v / train_size
+            #     else:
+            #         acc_metrics[k] = v / labelled_size
+
+            if "train" in history:
+                for k, v in loss_metrics.items():
+                    history["train"]["loss_metrics"][k].append(v/train_size)
+                for k, v in acc_metrics.items():
+                    if k == "dis_acc":
+                        history["train"]["acc_metrics"][k].append(v / train_size)
+                    else:
+                        history["train"]["acc_metrics"][k].append(v / labelled_size)
+            else:
+                history["train"] = {
+                    "loss_metrics": {
+                        k: [v/train_size] for k, v in loss_metrics.items()
+                    },
+                    "acc_metrics": {
+                        k: ([v/train_size] if k == "dis_acc" else [v/labelled_size])
+                        for k, v in acc_metrics.items()
+                    }
+                }
 
             if verbose:
                 self._print_metrics(loss_metrics, precision=6)
@@ -250,6 +271,25 @@ class DANNModel(SingleDomainModel):
             # Run on validation set if provided
             if val_loader is not None:
                 loss_metrics, acc_metrics = self.evaluate(val_loader, val=True, verbose=verbose)
+
+                if "val" in history:
+                    for k, v in loss_metrics.items():
+                        history["val"]["loss_metrics"][k].append(v / train_size)
+                    for k, v in acc_metrics.items():
+                        if k == "dis_acc":
+                            history["val"]["acc_metrics"][k].append(v / train_size)
+                        else:
+                            history["val"]["acc_metrics"][k].append(v / labelled_size)
+                else:
+                    history["val"] = {
+                        "loss_metrics": {
+                            k: [v / train_size] for k, v in loss_metrics.items()
+                        },
+                        "acc_metrics": {
+                            k: ([v / train_size] if k == "dis_acc" else [v / labelled_size])
+                            for k, v in acc_metrics.items()
+                        }
+                    }
 
                 # Early stopping
                 if loss_metrics["classifier_loss"] < min_val_loss:
@@ -264,6 +304,7 @@ class DANNModel(SingleDomainModel):
 
         print("Epochs used: ", i + 1)
         self.load_state_dict(best_model)
+        return history
 
     def _evaluate_batch(self, imgs, labels):
         self.eval()

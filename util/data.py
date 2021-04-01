@@ -25,7 +25,7 @@ class DataGenerator:
         test_split=0.2,
         input_shape=(224, 224),
         target_labels=0.1,
-        val_from_labelled=False
+        val_from_labelled=True
     ):
         self.val_from_labelled = val_from_labelled
 
@@ -47,10 +47,12 @@ class DataGenerator:
             target_labels
         )
 
-        if len(tar_val) <= 10:
-            val = torch.utils.data.ConcatDataset([src_val, tar_val])
-        else:
-            val = tar_val
+        # if len(tar_val) <= 10:
+        #     val = torch.utils.data.ConcatDataset([src_val, tar_val])
+        # else:
+        #     val = tar_val
+
+        val = torch.utils.data.ConcatDataset([src_val, tar_val])
 
         train_label = torch.utils.data.ConcatDataset([src_train, tar_train_label])
         self.train_label_loader = DataLoader(dataset=train_label, batch_size=64, shuffle=True, num_workers=0)

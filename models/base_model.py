@@ -149,6 +149,8 @@ class SingleDomainModel(nn.Module):
 
         current_patience = patience
 
+        history = {}
+
         # Perform training over number of epochs
         for i in range(max_epochs):
             self.train()
@@ -193,9 +195,24 @@ class SingleDomainModel(nn.Module):
                     loss_metrics[k] += v
                 for k, v in batch_acc.items():
                     acc_metrics[k] += v
+            #
+            # loss_metrics = {k: v / train_size for k, v in loss_metrics.items()}
+            # acc_metrics = {k: v / train_size for k, v in acc_metrics.items()}
 
-            loss_metrics = {k: v / train_size for k, v in loss_metrics.items()}
-            acc_metrics = {k: v / train_size for k, v in acc_metrics.items()}
+            if "train" in history:
+                for k, v in loss_metrics.items():
+                    history["train"]["loss_metrics"][k].append(v/train_size)
+                for k, v in acc_metrics.items():
+                    history["train"]["acc_metrics"][k].append(v/train_size)
+            else:
+                history["train"] = {
+                    "loss_metrics": {
+                        k: [v/train_size] for k, v in loss_metrics.items()
+                    },
+                    "acc_metrics": {
+                        k: [v/train_size] for k, v in acc_metrics.items()
+                    }
+                }
 
             if verbose:
                 self._print_metrics(loss_metrics, precision=6)
@@ -204,6 +221,21 @@ class SingleDomainModel(nn.Module):
             # Run on validation set if provided
             if val_loader is not None:
                 loss_metrics, acc_metrics = self.evaluate(val_loader, val=True, verbose=verbose)
+
+                if "val" in history:
+                    for k, v in loss_metrics.items():
+                        history["val"]["loss_metrics"][k].append(v)
+                    for k, v in acc_metrics.items():
+                        history["val"]["acc_metrics"][k].append(v)
+                else:
+                    history["val"] = {
+                        "loss_metrics": {
+                            k: [v / train_size] for k, v in loss_metrics.items()
+                        },
+                        "acc_metrics": {
+                            k: [v / train_size] for k, v in acc_metrics.items()
+                        }
+                    }
 
                 # Early stopping
                 if loss_metrics["classifier_loss"] < min_val_loss:
@@ -218,6 +250,7 @@ class SingleDomainModel(nn.Module):
 
         print("Epochs used: ", i + 1)
         self.load_state_dict(best_model)
+        return history
 
     def evaluate(self, loader, val=False, verbose=True):
         data_size = len(loader.dataset)

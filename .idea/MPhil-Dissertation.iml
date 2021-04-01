@@ -5,4 +5,11 @@
     <orderEntry type="jdk" jdkName="Remote Python 3.8.5 (sftp://rhc37@dev-gpu-rhc37.cl.cam.ac.uk:22/usr/bin/python3.8)" jdkType="Python SDK" />
     <orderEntry type="sourceFolder" forTests="false" />
   </component>
+  <component name="PyNamespacePackagesService">
+    <option name="namespacePackageFolders">
+      <list>
+        <option value="$MODULE_DIR$/util" />
+      </list>
+    </option>
+  </component>
 </module>
