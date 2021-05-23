@@ -37,4 +37,4 @@ for i, p in enumerate(labelled_prop):
     print()
 
 with open('NN.json', 'w') as fp:
-    json.dump(exp_history, fp)
+    json.dump(exp_history, fp, indent="\t")

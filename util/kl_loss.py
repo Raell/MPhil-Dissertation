@@ -9,7 +9,7 @@ def KL_Loss(y_pred, classes):
 
     y_ind_joint = torch.reshape((y_domain + y_class), (-1, 2 * classes))
 
-    return torch.nn.KLDivLoss(log_target=True)(
+    return torch.nn.KLDivLoss(log_target=True, reduction="batchmean")(
         y_joint,
         y_ind_joint
     )

@@ -41,4 +41,4 @@ for i, (p, rep, risk) in enumerate(zip(labelled_prop, rep_lambda, risk_lambda)):
     print()
 
 with open('DANN_KL.json', 'w') as fp:
-    json.dump(exp_history, fp)
+    json.dump(exp_history, fp, indent="\t")

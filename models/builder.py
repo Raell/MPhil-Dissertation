@@ -19,8 +19,7 @@ def build_classifier(input_shape, classes, joint=True):
         nn.Linear(1280, 1280),
         nn.ReLU(True),
         nn.Dropout(0.2),
-        nn.Linear(1280, domains * classes),
-        nn.LogSoftmax()
+        nn.Linear(1280, domains * classes)
     )
     return classifier
 

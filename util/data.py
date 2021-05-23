@@ -1,7 +1,9 @@
 import torch
 import torchvision
 from torchvision import transforms
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
+from sklearn.model_selection import train_test_split, KFold
+import numpy as np
 
 class Dataset(torch.utils.data.Dataset):
     def __init__(self, data, labels=True):
@@ -21,62 +23,25 @@ class DataGenerator:
         self,
         source_domain,
         target_domain,
-        val_split=0.2,
-        test_split=0.2,
         input_shape=(224, 224),
-        target_labels=0.1,
-        val_from_labelled=True
+        seed=None
     ):
-        self.val_from_labelled = val_from_labelled
 
-        src_train, src_val = self.__prepare_data(
+        self.seed = seed
+
+        self.src_data = self.__prepare_data__(
             source_domain,
             input_shape,
-            True,
-            val_split,
-            test_split,
-            target_labels
+            True
         )
 
-        tar_train_label, tar_train_nlabel, tar_val, test = self.__prepare_data(
+        self.tar_data = self.__prepare_data__(
             target_domain,
             input_shape,
-            False,
-            val_split,
-            test_split,
-            target_labels
+            False
         )
 
-        # if len(tar_val) <= 10:
-        #     val = torch.utils.data.ConcatDataset([src_val, tar_val])
-        # else:
-        #     val = tar_val
-
-        val = torch.utils.data.ConcatDataset([src_val, tar_val])
-
-        train_label = torch.utils.data.ConcatDataset([src_train, tar_train_label])
-        self.train_label_loader = DataLoader(dataset=train_label, batch_size=64, shuffle=True, num_workers=0)
-        if target_labels < 1:
-            self.train_nlabel_loader = DataLoader(dataset=tar_train_nlabel, batch_size=64, shuffle=True, num_workers=0)
-        else:
-            self.train_nlabel_loader = None
-
-        # self.train_src_loader = DataLoader(dataset=src_train, batch_size=32, shuffle=True, num_workers=0)
-        #
-        # if target_labels > 0:
-        #     self.train_tar_label_loader = DataLoader(dataset=tar_train_label, batch_size=32, shuffle=True, num_workers=0)
-        # else:
-        #     self.train_tar_label_loader = None
-        #
-        # if target_labels < 1:
-        #     self.train_tar_nlabel_loader = DataLoader(dataset=tar_train_nlabel, batch_size=32, shuffle=True, num_workers=0)
-        # else:
-        #     self.train_tar_nlabel_loader = None
-
-        self.val_loader = DataLoader(dataset=val, batch_size=64, shuffle=True, num_workers=0)
-        self.test_loader = DataLoader(dataset=test, batch_size=64, shuffle=True, num_workers=0)
-
-    def __prepare_data(self, folder, input_shape, src=True, val_split=0, test_split=0, target_labels=0.1):
+    def __prepare_data__(self, folder, input_shape, src=True, test_split=0):
 
         transform = transforms.Compose([
             transforms.Resize(input_shape),
@@ -86,54 +51,44 @@ class DataGenerator:
         label = 0 if src else 1
 
         data = torchvision.datasets.ImageFolder(folder, transform=transform)
-        data.target_transform = lambda id: torch.Tensor((label, id))
+        data.target_transform = lambda id: torch.Tensor((label, id)).long()
 
         self.classes = data.classes
 
-        if src:
+        return data
 
-            train, val = torch.utils.data.random_split(
-                data,
-                [round(len(data) * (1 - val_split) - 1e-5), round(len(data) * val_split + 1e-5)]
-            )
+    def get_TCV(self, test_split=0.2):
+        src_train, src_test = torch.utils.data.random_split(
+            self.src_data,
+            [
+                round(len(self.src_data) * (1 - test_split) - 1e-5),
+                round(len(self.src_data) * test_split + 1e-5)
+            ],
+            generator=None if self.seed is None else torch.Generator().manual_seed(self.seed)
+        )
 
-            return train, val
+        return src_train, src_test, Dataset(self.tar_data, labels=False)
 
-        else:
-            data, test = torch.utils.data.random_split(
-                data,
-                [round(len(data) * (1 - test_split) - 1e-5), round(len(data) * test_split + 1e-5)]
-            )
+    def get_datasets(self, target_labels, test_split=0.2):
 
-            if self.val_from_labelled:
-                train, train_nlabel = torch.utils.data.random_split(
-                    data,
-                    [round(len(data) * target_labels - 1e-5), round(len(data) * (1 - target_labels) + 1e-5)]
-                )
+        tar_train, tar_test = torch.utils.data.random_split(
+            self.tar_data,
+            [
+                round(len(self.tar_data) * (1 - test_split) - 1e-5),
+                round(len(self.tar_data) * test_split + 1e-5)
+            ],
+            generator=None if self.seed is None else torch.Generator().manual_seed(self.seed)
+        )
 
-                train_label, val = torch.utils.data.random_split(
-                    train,
-                    [round(len(train) * (1 - val_split) - 1e-5), round(len(train) * val_split + 1e-5)]
-                )
-            else:
-                train, val = torch.utils.data.random_split(
-                    data,
-                    [round(len(data) * (1 - val_split) - 1e-5), round(len(data) * val_split + 1e-5)]
-                )
+        tar_label, train_nlabel = torch.utils.data.random_split(
+            tar_train,
+            [
+                round(len(tar_train) * target_labels - 1e-5),
+                round(len(tar_train) * (1 - target_labels) + 1e-5)
+            ],
+            generator=None if self.seed is None else torch.Generator().manual_seed(self.seed)
+        )
 
-                train_label, train_nlabel = torch.utils.data.random_split(
-                    train,
-                    [round(len(train) * target_labels - 1e-5), round(len(train) * (1 - target_labels) + 1e-5)]
-                )
+        train_label = torch.utils.data.ConcatDataset([self.src_data, tar_label])
 
-            return train_label, Dataset(train_nlabel, False), val, test
-
-    def train_data(self):
-        # return self.train_src_loader, self.train_tar_label_loader, self.train_tar_nlabel_loader
-        return self.train_label_loader, self.train_nlabel_loader
-
-    def val_data(self):
-        return self.val_loader
-
-    def test_data(self):
-        return self.test_loader
+        return train_label, Dataset(train_nlabel, labels=False), tar_test
