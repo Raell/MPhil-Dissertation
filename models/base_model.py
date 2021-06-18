@@ -14,19 +14,23 @@ class SingleDomainModel(pl.LightningModule):
     def __init__(
             self,
             classes=65,
+            domains=2,
             use_KL=True,
-            risk_lambda=1,
-            lr=1e-4
+            risk_lambda=1e-3,
+            lr=1e-4,
+            kl_eval=False
     ):
         super().__init__()
         self.classes = classes
+        self.domains = domains
         self.encoder = build_encoder()
-        self.classifier = build_classifier(512, self.classes, use_KL)
+        self.classifier = build_classifier(512, self.classes, self.domains if use_KL else 1)
 
         self.lr = lr
 
         self.use_KL = use_KL
         self.risk_lambda = risk_lambda
+        self.kl_eval = kl_eval
 
         self.train_acc = torchmetrics.Accuracy()
         self.val_acc = torchmetrics.Accuracy()
@@ -36,11 +40,11 @@ class SingleDomainModel(pl.LightningModule):
         features = self.encoder(inputs)
         classes = self.classifier(features)
         if self.use_KL:
-            classes = torch.reshape(classes, (-1, 2, self.classes))
+            classes = torch.reshape(classes, (-1, self.domains, self.classes))
         return classes
 
     def configure_optimizers(self):
-        if self.use_KL:
+        if self.use_KL and not self.kl_eval:
             enc_opt = torch.optim.Adam(self.encoder.parameters(), lr=self.lr)
             cls_opt = torch.optim.Adam(self.classifier.parameters(), lr=self.lr)
             return [enc_opt, cls_opt], []
@@ -67,10 +71,15 @@ class SingleDomainModel(pl.LightningModule):
                 y_class = torch.sum(y_pred, 1)
 
                 # Calculate losses and metrics
-                class_pred_loss = torch.nn.CrossEntropyLoss()(y_class, class_labels)
+                class_pred_loss = torch.nn.NLLLoss()(y_class, class_labels)
                 kl_loss = KL_Loss(y_pred, self.classes) * self.risk_lambda
                 kl_loss += KL_Loss(nl_y_pred, self.classes) * self.risk_lambda
-                encoder_loss = class_pred_loss + kl_loss
+
+                if self.kl_eval:
+                    encoder_loss = class_pred_loss
+                else:
+                    encoder_loss = class_pred_loss + kl_loss
+
 
                 self.train_acc(nn.functional.softmax(y_class, dim=1), class_labels)
 
@@ -87,10 +96,10 @@ class SingleDomainModel(pl.LightningModule):
 
             if optimizer_idx == 1:
                 # Classifier training
-                y_joint = torch.reshape(y_pred, (-1, 2 * self.classes))
+                y_joint = torch.reshape(y_pred, (-1, self.domains * self.classes))
 
                 # Calculate losses and metrics
-                classifier_loss = torch.nn.CrossEntropyLoss()(y_joint, joint_labels)
+                classifier_loss = torch.nn.NLLLoss()(y_joint, joint_labels)
 
                 self.log_dict(
                     {
@@ -110,7 +119,7 @@ class SingleDomainModel(pl.LightningModule):
             y_pred = self(imgs)
 
             # Calculate losses and metrics
-            loss = torch.nn.CrossEntropyLoss()(y_pred, class_labels)
+            loss = torch.nn.NLLLoss()(y_pred, class_labels)
 
             self.train_acc(nn.functional.softmax(y_pred, dim=1), class_labels)
 
@@ -128,19 +137,17 @@ class SingleDomainModel(pl.LightningModule):
         self.log("val_acc", self.val_acc.compute())
 
     def validation_step(self, batch, batch_idx):
+        imgs, labels = batch
+        class_labels = labels[:, 1]
+
+        # Feedforward
+        y_pred = self(imgs)
+
         if self.use_KL:
-            (l_imgs, labels), nl_imgs = batch
-            class_labels = labels[:, 1]
-
-            # Feedforward
-            y_pred = self(l_imgs)
-            nl_y_pred = self(nl_imgs)
-
             y_class = torch.sum(y_pred, 1)
 
-            class_pred_loss = torch.nn.CrossEntropyLoss()(y_class, class_labels)
+            class_pred_loss = torch.nn.NLLLoss()(y_class, class_labels)
             kl_loss = KL_Loss(y_pred, self.classes) * self.risk_lambda
-            kl_loss += KL_Loss(nl_y_pred, self.classes) * self.risk_lambda
 
             loss = class_pred_loss + kl_loss
 
@@ -158,13 +165,7 @@ class SingleDomainModel(pl.LightningModule):
             return loss
 
         else:
-            imgs, labels = batch
-            class_labels = labels[:, 1]
-
-            # Feedforward
-            y_pred = self(imgs)
-
-            loss = torch.nn.CrossEntropyLoss()(y_pred, class_labels)
+            loss = torch.nn.NLLLoss()(y_pred, class_labels)
 
             self.val_acc(nn.functional.softmax(y_pred, dim=1), class_labels)
 
@@ -182,19 +183,17 @@ class SingleDomainModel(pl.LightningModule):
         self.log("test_acc", self.test_acc.compute())
 
     def test_step(self, batch, batch_idx):
+        imgs, labels = batch
+        class_labels = labels[:, 1]
+
+        # Feedforward
+        y_pred = self(imgs)
+
         if self.use_KL:
-            (l_imgs, labels), nl_imgs = batch
-            class_labels = labels[:, 1]
-
-            # Feedforward
-            y_pred = self(l_imgs)
-            nl_y_pred = self(nl_imgs)
-
             y_class = torch.sum(y_pred, 1)
 
-            class_pred_loss = torch.nn.CrossEntropyLoss()(y_class, class_labels)
+            class_pred_loss = torch.nn.NLLLoss()(y_class, class_labels)
             kl_loss = KL_Loss(y_pred, self.classes) * self.risk_lambda
-            kl_loss += KL_Loss(nl_y_pred, self.classes) * self.risk_lambda
 
             loss = class_pred_loss + kl_loss
 
@@ -212,13 +211,7 @@ class SingleDomainModel(pl.LightningModule):
             return loss
 
         else:
-            imgs, labels = batch
-            class_labels = labels[:, 1]
-
-            # Feedforward
-            y_pred = self(imgs)
-
-            loss = torch.nn.CrossEntropyLoss()(y_pred, class_labels)
+            loss = torch.nn.NLLLoss()(y_pred, class_labels)
 
             self.test_acc(nn.functional.softmax(y_pred, dim=1), class_labels)
 

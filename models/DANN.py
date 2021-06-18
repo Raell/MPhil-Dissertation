@@ -17,18 +17,20 @@ class DANNModel(SingleDomainModel):
     def __init__(
         self,
         classes=65,
+        domains=2,
         use_KL=True,
-        risk_lambda=1,
-        rep_lambda=1,
+        risk_lambda=0.1,
+        rep_lambda=0.1,
         lr=1e-4
     ):
         super().__init__(
             classes=classes,
+            domains=domains,
             use_KL=use_KL,
             risk_lambda=risk_lambda,
             lr=lr
         )
-        self.discriminator = build_discriminator(512)
+        self.discriminator = build_discriminator(512, domains)
         self.rep_lambda = rep_lambda
 
         self.train_acc = torchmetrics.Accuracy()
@@ -39,9 +41,9 @@ class DANNModel(SingleDomainModel):
         features = self.encoder(inputs)
         classes = self.classifier(features)
         if self.use_KL:
-            classes = torch.reshape(classes, (-1, 2, self.classes))
+            classes = torch.reshape(classes, (-1, self.domains, self.classes))
         domains = self.discriminator(ReverseLayer.apply(features, self.rep_lambda))
-        domains = torch.squeeze(domains)
+        # domains = torch.squeeze(domains)
         return classes, domains
 
     def configure_optimizers(self):
@@ -73,12 +75,14 @@ class DANNModel(SingleDomainModel):
                 y_class = torch.sum(y_pred, 1)
 
                 # Calculate losses and metrics
-                class_pred_loss = torch.nn.CrossEntropyLoss()(y_class, class_labels)
+                class_pred_loss = torch.nn.NLLLoss()(y_class, class_labels)
                 kl_loss = KL_Loss(y_pred, self.classes) * self.risk_lambda
                 kl_loss += KL_Loss(nl_pred, self.classes) * self.risk_lambda
-                dis_loss = torch.nn.CrossEntropyLoss()(l_domain_pred, domain_labels.type_as(l_domain_pred))
-                dis_loss += torch.nn.CrossEntropyLoss()(nl_domain_pred,
-                                                         torch.ones(nl_domain_pred.shape).type_as(nl_domain_pred))
+                dis_loss = torch.nn.CrossEntropyLoss()(l_domain_pred, domain_labels)
+                dis_loss += torch.nn.CrossEntropyLoss()(
+                    nl_domain_pred,
+                    (torch.ones(nl_domain_pred.shape[0]) * (self.domains - 1)).type_as(nl_domain_pred).long()
+                )
                 loss = class_pred_loss + kl_loss + dis_loss
 
                 self.train_acc(nn.functional.softmax(y_class, dim=1), class_labels)
@@ -97,10 +101,10 @@ class DANNModel(SingleDomainModel):
 
             if optimizer_idx == 1:
                 # Classifier training
-                y_joint = torch.reshape(y_pred, (-1, 2 * self.classes))
+                y_joint = torch.reshape(y_pred, (-1, self.domains * self.classes))
 
                 # Calculate losses and metrics
-                classifier_loss = torch.nn.CrossEntropyLoss()(y_joint, joint_labels)
+                classifier_loss = torch.nn.NLLLoss()(y_joint, joint_labels)
 
                 self.log_dict(
                     {
@@ -114,10 +118,12 @@ class DANNModel(SingleDomainModel):
 
         else:
             # Calculate losses and metrics
-            class_pred_loss = torch.nn.CrossEntropyLoss()(y_pred, class_labels)
-            dis_loss = torch.nn.CrossEntropyLoss()(l_domain_pred, domain_labels.type_as(l_domain_pred))
-            dis_loss += torch.nn.CrossEntropyLoss()(nl_domain_pred,
-                                                     torch.ones(nl_domain_pred.shape).type_as(nl_domain_pred))
+            class_pred_loss = torch.nn.NLLLoss()(y_pred, class_labels)
+            dis_loss = torch.nn.CrossEntropyLoss()(l_domain_pred, domain_labels)
+            dis_loss += torch.nn.CrossEntropyLoss()(
+                nl_domain_pred,
+                (torch.ones(nl_domain_pred.shape[0]) * (self.domains - 1)).type_as(nl_domain_pred).long()
+            )
             loss = class_pred_loss + dis_loss
 
             self.train_acc(nn.functional.softmax(y_pred, dim=1), class_labels)
@@ -148,9 +154,9 @@ class DANNModel(SingleDomainModel):
             y_class = torch.sum(y_pred, 1)
 
             # Calculate losses and metrics
-            class_pred_loss = torch.nn.CrossEntropyLoss()(y_class, class_labels)
+            class_pred_loss = torch.nn.NLLLoss()(y_class, class_labels)
             kl_loss = KL_Loss(y_pred, self.classes) * self.risk_lambda
-            dis_loss = torch.nn.CrossEntropyLoss()(domain_pred, domain_labels.type_as(domain_pred))
+            dis_loss = torch.nn.CrossEntropyLoss()(domain_pred, domain_labels)
             loss = class_pred_loss + kl_loss + dis_loss
 
             self.val_acc(nn.functional.softmax(y_class, dim=1), class_labels)
@@ -168,8 +174,8 @@ class DANNModel(SingleDomainModel):
             return loss
 
         else:
-            class_pred_loss = torch.nn.CrossEntropyLoss()(y_pred, class_labels)
-            dis_loss = torch.nn.CrossEntropyLoss()(domain_pred, domain_labels.type_as(domain_pred))
+            class_pred_loss = torch.nn.NLLLoss()(y_pred, class_labels)
+            dis_loss = torch.nn.CrossEntropyLoss()(domain_pred, domain_labels)
             loss = class_pred_loss + dis_loss
 
             self.val_acc(nn.functional.softmax(y_pred, dim=1), class_labels)
@@ -200,9 +206,9 @@ class DANNModel(SingleDomainModel):
             y_class = torch.sum(y_pred, 1)
 
             # Calculate losses and metrics
-            class_pred_loss = torch.nn.CrossEntropyLoss()(y_class, class_labels)
+            class_pred_loss = torch.nn.NLLLoss()(y_class, class_labels)
             kl_loss = KL_Loss(y_pred, self.classes) * self.risk_lambda
-            dis_loss = torch.nn.CrossEntropyLoss()(domain_pred, domain_labels.type_as(domain_pred))
+            dis_loss = torch.nn.CrossEntropyLoss()(domain_pred, domain_labels)
             loss = class_pred_loss + kl_loss + dis_loss
 
             self.test_acc(nn.functional.softmax(y_class, dim=1), class_labels)
@@ -220,8 +226,8 @@ class DANNModel(SingleDomainModel):
             return loss
 
         else:
-            class_pred_loss = torch.nn.CrossEntropyLoss()(y_pred, class_labels)
-            dis_loss = torch.nn.CrossEntropyLoss()(domain_pred, domain_labels.type_as(domain_pred))
+            class_pred_loss = torch.nn.NLLLoss()(y_pred, class_labels)
+            dis_loss = torch.nn.CrossEntropyLoss()(domain_pred, domain_labels)
             loss = class_pred_loss + dis_loss
 
             self.test_acc(nn.functional.softmax(y_pred, dim=1), class_labels)

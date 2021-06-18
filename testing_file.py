@@ -9,12 +9,16 @@ from typing import Any, Dict, Optional, Union
 
 import numpy as np
 import torch
+from torchsummary import summary
 from pytorch_lightning.callbacks import ProgressBar, ModelCheckpoint, EarlyStopping
 from pytorch_lightning.loggers import LightningLoggerBase
 from torch.utils.data import DataLoader, ConcatDataset
 from tqdm import tqdm
 
 import logging
+
+from models.kl_model import KLModel, DANNKLModel
+
 logging.getLogger("lightning").addHandler(logging.NullHandler())
 logging.getLogger("lightning").propagate = False
 
@@ -82,21 +86,27 @@ class ZipDataset(torch.utils.data.Dataset):
         return len(self.data)
 
 
-
-def train_model(model, train, test, epochs=None, eval=True):
+def train_model(model, train, val, test, min_epochs=30, max_epochs=100, eval=True, patience=3):
     logger = MetricsLogger()
     pbar = LitProgressBar()
+
+    early_stopping = EarlyStopping(
+        monitor='val_acc',
+        patience=patience
+    )
 
     trainer = pl.Trainer(
         gpus=1,
         logger=logger,
         callbacks=[
-            pbar
+            pbar,
+            early_stopping
         ],
-        max_epochs=epochs,
+        min_epochs=min_epochs,
+        max_epochs=max_epochs,
         checkpoint_callback=False
     )
-    trainer.fit(model, train_dataloader=train, val_dataloaders=test)
+    trainer.fit(model, train_dataloader=train, val_dataloaders=val)
     if eval:
         trainer.test(model, test)
         return logger.metrics
@@ -128,17 +138,112 @@ def run_experiments(
         model_class,
         model_params,
         train,
+        val,
         test,
-        epochs=None,
-        return_preds=False
+        return_preds=False,
+        patience=3
 ):
     model = model_class(**model_params)
-    results = train_model(model, train, test, epochs=epochs, eval=not return_preds)
+    results = train_model(model, train, val, test, eval=not return_preds, patience=patience)
+
+    if return_preds:
+        if model_class == DANNModel:
+            results = [p[0] for p in results]
+
+        results = np.concatenate(results, axis=0)
+
+        if model_params["use_KL"]:
+            results = np.sum(results, axis=1)
+
     return results
 
 
-def get_cross_product(d):
+def eval_KL(
+    model_class,
+    model_params,
+    train,
+    val,
+    test,
+    patience=3
+):
+    is_DANN = model_class == DANNModel
+    if not is_DANN:
+        train_set = train[0]
+    params = dict(model_params)
+    model = model_class(**params)
+    _ = train_model(model, train_set, val, test, patience=patience)
+    encoder_params = model.encoder.state_dict()
 
+
+    params["use_KL"] = True
+    params["kl_eval"] = True
+    kl_model = model_class(**params)
+    kl_model.encoder.load_state_dict(encoder_params)
+    for param in kl_model.encoder.parameters():
+        param.requires_grad = False
+
+    results = train_model(kl_model, train, val, test, patience=patience)
+    return results
+
+def run_eval_KL(
+        model_class,
+        model_params,
+        data,
+        results,
+        target_labels=0.0,
+        num_exps=1,
+        main_header="",
+        sub_header=""
+):
+    # is_DANN = model_class == DANNModel
+
+    full_metrics = defaultdict(dict, results.metrics)
+    metrics = defaultdict(dict, full_metrics[main_header])
+
+    for i in range(num_exps):
+        print(f"{main_header}, {sub_header}, Experiment {i + 1}")
+
+        if (
+                main_header in full_metrics and
+                sub_header in full_metrics[main_header] and
+                f"Experiment {i + 1}" in full_metrics[main_header][sub_header]
+        ):
+            continue
+
+        # Load datasets
+        datasets = data.get_TCV(target_labels=target_labels)
+        src_train, src_test, tar_label, tar_nlabel, tar_test = datasets
+
+        # Prepare dataloaders
+        dataset = ConcatDataset([tar_label, src_train, src_test])
+        train, val = split_data(dataset, 0.2)
+        train_label_loader = prepare_loader(train, is_train=True)
+        val_loader = prepare_loader(val, is_train=False)
+
+        # if is_DANN:
+        train_nlabel_loader = prepare_loader(tar_nlabel, is_train=True)
+        train_loader = [train_label_loader, train_nlabel_loader]
+        #
+        # else:
+        # train_loader = train_label_loader
+
+        test_loader = prepare_loader(tar_test, is_train=False)
+
+        # Run evaluation
+        metrics[sub_header][f"Experiment {i + 1}"] = eval_KL(
+            model_class,
+            model_params,
+            train_loader,
+            val_loader,
+            test_loader,
+        )
+
+        full_metrics[main_header] = metrics
+
+        results.update(full_metrics)
+        results.save()
+
+def get_cross_product(d):
     pairs = d.items()
     keys = [k for k, _ in pairs]
     vals = [v for _, v in pairs]
@@ -148,284 +253,472 @@ def get_cross_product(d):
     return cross
 
 
+def prepare_loader(dataset, is_train=False):
+    return DataLoader(
+        dataset=dataset,
+        batch_size=64,
+        shuffle=is_train
+    )
+
+
+def split_data(data, split, seed=None):
+    split1, split2 = torch.utils.data.random_split(
+        data,
+        [
+            round(len(data) * (1 - split) - 1e-5),
+            round(len(data) * split + 1e-5)
+        ],
+        generator=None if seed is None else torch.Generator().manual_seed(seed)
+    )
+    return split1, split2
+
+
+def run_standard_val(
+        model_class,
+        model_params,
+        data,
+        results,
+        target_labels=0.0,
+        num_exps=3,
+        main_header="",
+        sub_header="",
+        labeled_target_only=False,
+        source_only=False
+):
+    is_DANN = model_class == DANNModel
+    use_KL = model_params["use_KL"]
+
+    full_metrics = defaultdict(dict, results.metrics)
+    metrics = defaultdict(dict, full_metrics[main_header])
+
+    for i in range(num_exps):
+        print(f"{main_header}, {sub_header}, Experiment {i + 1}")
+
+        if (
+                main_header in full_metrics and
+                sub_header in full_metrics[main_header] and
+                f"Experiment {i + 1}" in full_metrics[main_header][sub_header]
+        ):
+            continue
+
+        # Load datasets
+        datasets = data.get_TCV(target_labels=target_labels)
+        src_train, src_test, tar_label, tar_nlabel, tar_test = datasets
+
+        # Prepare dataloaders
+        dataset = ConcatDataset([tar_label, src_train, src_test])
+        if labeled_target_only:
+            dataset = tar_label
+        elif source_only:
+            dataset = ConcatDataset([src_train, src_test])
+        train, val = split_data(dataset, 0.2)
+        train_label_loader = prepare_loader(train, is_train=True)
+        val_loader = prepare_loader(val, is_train=False)
+
+        if is_DANN or use_KL:
+            if source_only:
+                train_nlabel_loader = prepare_loader(Dataset(train, labels=False), is_train=True)
+            else:
+                train_nlabel_loader = prepare_loader(tar_nlabel, is_train=True)
+
+            train_loader = [train_label_loader, train_nlabel_loader]
+
+        else:
+            train_loader = train_label_loader
+
+        test_loader = prepare_loader(tar_test, is_train=False)
+
+        # Run evaluation
+        metrics[sub_header][f"Experiment {i + 1}"] = run_experiments(
+            model_class,
+            model_params,
+            train_loader,
+            val_loader,
+            test_loader,
+        )
+
+        full_metrics[main_header] = metrics
+
+        results.update(full_metrics)
+        results.save()
+
+def run_reverse_val(
+        model_class,
+        model_params,
+        data,
+        results,
+        target_labels=0.0,
+        eval=False,
+        num_exps=3,
+        main_header="",
+        sub_header=""
+):
+    is_DANN = model_class == DANNModel
+    use_KL = model_params["use_KL"]
+
+    full_metrics = defaultdict(dict, results.metrics)
+    metrics = defaultdict(dict, full_metrics[main_header])
+
+    for i in range(num_exps):
+        print(f"{main_header}, {sub_header}, Experiment {i + 1}")
+
+        if (
+            main_header in full_metrics and
+            sub_header in full_metrics[main_header] and
+            f"Experiment {i + 1}" in full_metrics[main_header][sub_header]
+        ):
+            continue
+
+        # Load datasets
+        datasets = data.get_TCV(target_labels=target_labels)
+        src_train, src_test, tar_label, tar_nlabel, tar_test = datasets
+
+        # if eval:
+        #     src_train, src_test, tar_label, tar_nlabel, tar_test = datasets
+        # else:
+        #     src_train, src_test, tar_label, tar_nlabel = datasets
+
+        # Prepare dataloaders
+        train_label_loader = prepare_loader(src_train, is_train=True)
+        val_loader = prepare_loader(src_test, is_train=False)
+
+        if is_DANN or use_KL:
+            train_nlabel_loader = prepare_loader(tar_nlabel, is_train=True)
+            train_loader = [train_label_loader, train_nlabel_loader]
+        else:
+            train_loader = train_label_loader
+
+        test_loader = prepare_loader(tar_nlabel, is_train=False)
+
+        # Run source training and return predictions
+        preds = run_experiments(
+            model_class,
+            model_params,
+            train_loader,
+            val_loader,
+            test_loader,
+            return_preds=True
+        )
+
+        preds = torch.Tensor([(data.domains - 1, pred) for pred in np.argmax(preds, axis=1)]).long()
+
+        # Prepare dataloaders
+        tar_nlabel = ZipDataset(tar_nlabel, preds)
+        dataset = ConcatDataset([tar_label, tar_nlabel])
+
+        train, val = split_data(dataset, 0.2)
+        train_label_loader = prepare_loader(train, is_train=True)
+        val_loader = prepare_loader(val, is_train=False)
+
+        if is_DANN or use_KL:
+            train_nlabel_loader = prepare_loader(Dataset(src_train, labels=False), is_train=True)
+            train_loader = [train_label_loader, train_nlabel_loader]
+        else:
+            train_loader = train_label_loader
+
+        if eval:
+            test_loader = prepare_loader(tar_test, is_train=False)
+        else:
+            test_loader = prepare_loader(src_test, is_train=False)
+
+        metrics[sub_header][f"Experiment {i+1}"] = run_experiments(
+            model_class,
+            model_params,
+            train_loader,
+            val_loader,
+            test_loader
+        )
+
+        full_metrics[main_header] = metrics
+
+        results.update(full_metrics)
+        results.save()
+
 def hyperparam_search(
-    model_class,
-    param_search_dict,
-    filename,
-    num_epochs=30,
-    use_KL=False
+        model_class,
+        model_params,
+        param_search_dict,
+        filename,
+        src_domains=1,
+        num_exps=1
 ):
     results = Results(filename)
 
-    metrics = defaultdict(dict, results.metrics)
+    domains_combo = domain_combo(src_domains)
 
-    for src, target in itertools.permutations(DOMAINS, 2):
-        src_folder = DOMAIN_FOLDERS[src]
-        target_folder = DOMAIN_FOLDERS[target]
+    for src, target in domains_combo:
+        src_folder = [DOMAIN_FOLDERS[s] for s in src]
+        target_folder = [DOMAIN_FOLDERS[target]]
 
         data = DataGenerator(
             source_domain=src_folder,
             target_domain=target_folder
         )
 
-        model_params = {
-            "use_KL": use_KL,
-            "lr": 1e-5,
-            "classes": len(data.classes)
-        }
-
-        is_DANN = model_class == DANNModel
+        model_params["classes"] = len(data.classes)
+        model_params["domains"] = data.domains
 
         param_list = get_cross_product(param_search_dict)
 
         for params in param_list:
-            header = ""
+            main_header = ""
             for k, v in params.items():
                 model_params[k] = v
-                header += f"{k} {v}, "
-
-            header = header[:-2]
-
-            print(f"{src} -> {target}, {header}")
-
-            if header in metrics and f"{src} -> {target}" in metrics[header]:
-                continue
-
-            src_train, src_test, tar_nlabel = data.get_TCV()
-
-            train_label_loader = DataLoader(
-                dataset=src_train,
-                batch_size=64,
-                shuffle=True,
-                # num_workers=8
-            )
-
-            train_loader = train_label_loader
-
-            if is_DANN or use_KL:
-                train_nlabel_loader = DataLoader(
-                    dataset=tar_nlabel,
-                    batch_size=64,
-                    shuffle=True,
-                    # num_workers=8
-                )
-
-                train_loader = [train_label_loader, train_nlabel_loader]
-
-            test_loader = DataLoader(
-                dataset=tar_nlabel,
-                batch_size=64,
-                # num_workers=8
-            )
-
-            preds = run_experiments(
+                main_header += f"{k} {v}, "
+            main_header = main_header[:-2]
+            sub_header = f"{src} -> {target}"
+            run_reverse_val(
                 model_class,
                 model_params,
-                train_loader,
-                test_loader,
-                num_epochs,
-                return_preds=True
+                data,
+                results,
+                num_exps=num_exps,
+                main_header=main_header,
+                sub_header=sub_header
             )
 
-            if is_DANN:
-                preds = [p[0] for p in preds]
+def domain_combo(src_domains):
+    combo = []
+    if src_domains == 1:
+        for s in DOMAINS:
+            for t in DOMAINS:
+                if s == t:
+                    continue
+                combo.append(([s], t))
 
-            preds = np.concatenate(preds, axis=0)
-            if use_KL:
-                preds = np.sum(preds, axis=1)
+    elif src_domains == 2:
+        for t in DOMAINS:
+            remain = [d for d in DOMAINS if d != t]
+            for src in itertools.combinations(remain, 2):
+                combo.append((src, t))
 
-            preds = torch.Tensor([(1, pred) for pred in np.argmax(preds, axis=1)]).long()
-
-            train = ZipDataset(tar_nlabel, preds)
-
-            train_label_loader = DataLoader(
-                dataset=train,
-                batch_size=64,
-                shuffle=True,
-                # num_workers=8
-            )
-
-            train_loader = train_label_loader
-
-            if is_DANN or use_KL:
-                train_nlabel_loader = DataLoader(
-                    dataset=Dataset(src_train, labels=False),
-                    batch_size=64,
-                    shuffle=True,
-                    # num_workers=8
-                )
-                train_loader = [train_label_loader, train_nlabel_loader]
-
-            test_loader = DataLoader(
-                dataset=src_test,
-                batch_size=64,
-                # num_workers=8
-            )
-
-            metrics[header][f"{src} -> {target}"] = run_experiments(
-                model_class,
-                model_params,
-                train_loader,
-                test_loader,
-                num_epochs
-            )
-
-            results.update(metrics)
-            results.save()
-
+    elif src_domains == 3:
+        for t in DOMAINS:
+            combo.append(([d for d in DOMAINS if d != t], t))
+    return combo
 
 def run_eval(
-    model_class,
-    filename,
-    labelled_prop_list=[0.1, 0.3],
-    num_epochs=100,
-    hyperparams_dict={},
-    use_KL=False,
-    num_exps=3,
-    lr=1e-4
+        model_class,
+        model_params,
+        filename,
+        labelled_prop_list=[0.1, 0.3],
+        num_exps=3,
+        src_domains=1,
+        standard_eval=True,
+        labeled_target_only=False,
+        source_only=False,
+        kl_eval=False
 ):
     results = Results(filename)
+    domains_combo = domain_combo(src_domains)
 
-    overall_metrics = defaultdict(dict, results.metrics)
+    for src, target in domains_combo:
+        src_folder = [DOMAIN_FOLDERS[s] for s in src]
+        target_folder = [DOMAIN_FOLDERS[target]]
 
-    for src, target in itertools.permutations(DOMAINS, 2):
-        src_folder = DOMAIN_FOLDERS[src]
-        target_folder = DOMAIN_FOLDERS[target]
+        main_header = f"{src} -> {target}"
 
         data = DataGenerator(
             source_domain=src_folder,
             target_domain=target_folder
         )
 
-        model_params = {
-            "use_KL": use_KL,
-            "lr": lr,
-            "classes": len(data.classes)
-        }
-
-        for k, v in hyperparams_dict.items():
-            model_params[k] = v
-
-        is_DANN = model_class == DANNModel
-        metrics = defaultdict(dict, overall_metrics[f"{src} -> {target}"])
+        model_params["classes"] = len(data.classes)
+        model_params["domains"] = data.domains
 
         for p in labelled_prop_list:
-            header = f"{int(p * 100)}% labels"
-
-            train_label, train_nlabel, test = data.get_datasets(p)
-
-            train_label_loader = DataLoader(
-                dataset=train_label,
-                batch_size=64,
-                shuffle=True,
-                num_workers=8
-            )
-
-            train_loader = train_label_loader
-
-            if is_DANN or use_KL:
-                train_nlabel_loader = DataLoader(
-                    dataset=train_nlabel,
-                    batch_size=64,
-                    shuffle=True,
-                    num_workers=8
-                )
-
-                train_loader = [train_label_loader, train_nlabel_loader]
-
-            test_loader = DataLoader(
-                dataset=test,
-                batch_size=64,
-                num_workers=8
-            )
-
-            for i in range(num_exps):
-                print(f"{src} -> {target}, {header}, Experiment {i+1}")
-
-                if header in metrics and f"Experiment {i+1}" in metrics[header]:
-                    continue
-
-                metrics[header][f"Experiment {i+1}"] = run_experiments(
+            sub_header = f"{int(p * 100)}% labels"
+            if kl_eval:
+                run_eval_KL(
                     model_class,
                     model_params,
-                    train_loader,
-                    test_loader,
-                    num_epochs
+                    data,
+                    results,
+                    target_labels=p,
+                    main_header=main_header,
+                    sub_header=sub_header
                 )
 
-                overall_metrics[f"{src} -> {target}"] = metrics
+            elif standard_eval:
+                run_standard_val(
+                    model_class,
+                    model_params,
+                    data,
+                    results,
+                    target_labels=p,
+                    num_exps=num_exps,
+                    main_header=main_header,
+                    sub_header=sub_header,
+                    labeled_target_only=labeled_target_only,
+                    source_only=source_only
+                )
+            else:
+                run_reverse_val(
+                    model_class,
+                    model_params,
+                    data,
+                    results,
+                    target_labels=p,
+                    eval=True,
+                    num_exps=num_exps,
+                    main_header=main_header,
+                    sub_header=sub_header
+                )
 
-                results.update(overall_metrics)
-                results.save()
+run_eval(
+    model_class=SingleDomainModel,
+    model_params={
+        "use_KL": False,
+        "risk_lambda": 1e-3
+    },
+    filename="kl_study/NN.json",
+    labelled_prop_list=[0.1, 0.3],
+    num_exps=1,
+    src_domains=1,
+    kl_eval=True
+)
 
-
-# data_folder = "~/Datasets/Experiment"
-# src_folder = os.path.join(data_folder, "Real World")
-# target_folder = os.path.join(data_folder, "Product")
-# data = DataGenerator(
-#     source_domain=src_folder,
-#     target_domain=target_folder
-# )
-
-# run_eval(
-#     DANNModel,
-#     data,
-#     "DANN.json"
-# )
 
 # hyperparam_search(
-#     SingleDomainModel,
-#     {
-#         "risk_lambda": [1e-3, 1e-2, 1e-1]
-#     },
-#     # f"NN_KL_search.json",
-#     "test.json",
-#     use_KL=True,
-#     num_epochs=1
-# )
-
-# hyperparam_search(
 #     DANNModel,
-#     {
-#         "rep_lambda": [1e-3, 1e-2, 1e-1]
+#     model_params={
+#         "use_KL": False,
 #     },
-#     f"DANN_search.json",
-#     use_KL=False
+#     param_search_dict={
+#         "lr": [1e-6, 1e-2]
+#     },
+#     filename=f"hyperparam_search/lr_search.json"
 # )
 #
 # hyperparam_search(
 #     DANNModel,
-#     {
-#         "risk_lambda": [1e-3, 1e-2, 1e-1],
-#         "rep_lambda": [1e-3, 1e-2, 1e-1]
+#     model_params={
+#         "use_KL": False
 #     },
-#     f"DANN_KL_search.json",
-#     use_KL=True
+#     param_search_dict={
+#         "rep_lambda": [0.001, 10]
+#     },
+#     filename=f"hyperparam_search/DANN_search.json"
 # )
 
-run_eval(
-    SingleDomainModel,
-    "NN_KL.json",
-    num_epochs=100,
-    num_exps=1,
-    hyperparams_dict={
-        "risk_lambda": 0.01
-    },
-    lr=1e-4
-)
+# hyperparam_search(
+#     SingleDomainModel,
+#     model_params={
+#         "use_KL": True,
+#     },
+#     param_search_dict={
+#         "risk_lambda": [1e-5, 1e-1]
+#     },
+#     filename=f"hyperparam_search/NN_KL_search.json"
+# )
 
-run_eval(
-    SingleDomainModel,
-    "NN.json",
-    num_epochs=100,
-    num_exps=3,
-    lr=1e-4
-)
+# hyperparam_search(
+#     DANNModel,
+#     model_params={
+#         "use_KL": True,
+#     },
+#     param_search_dict={
+#         "risk_lambda": [1e-4, 1e-3, 1e-2],
+#         "rep_lambda": [1e-2, 1e-1, 1]
+#     },
+#     filename=f"DANN_KL_search.json"
+# )
+
 
 # run_eval(
-#     SingleDomainModel,
-#     "higher_lr.json",
-#     num_epochs=100,
+#     model_class=DANNModel,
+#     model_params={
+#         "use_KL": False,
+#         "rep_lambda": 1e-1
+#     },
+#     filename="DANN.json",
+#     labelled_prop_list=[0.1, 0.3],
 #     num_exps=3,
-#     lr=1e-4
+#     src_domains=1
 # )
+
+# run_eval(
+#     model_class=DANNModel,
+#     model_params={
+#         "use_KL": True,
+#         "risk_lambda": 1e-3,
+#         "rep_lambda": 1e-1
+#     },
+#     filename="TCV_eval/DANN_KL.json",
+#     labelled_prop_list=[0.1, 0.3],
+#     num_exps=3,
+#     src_domains=1,
+#     standard_eval=False
+# )
+
+# run_eval(
+#     model_class=DANNModel,
+#     model_params={
+#         "use_KL": False,
+#         "rep_lambda": 1e-1
+#     },
+#     filename="standard_eval/DANN_3src.json",
+#     labelled_prop_list=[0.1, 0.3],
+#     num_exps=3,
+#     src_domains=3,
+#     standard_eval=True
+# )
+
+
+# run_eval(
+#     model_class=SingleDomainModel,
+#     model_params={
+#         "use_KL": False
+#     },
+#     filename="standard_eval/NN_source_only.json",
+#     labelled_prop_list=[0.1],
+#     num_exps=1,
+#     src_domains=1,
+#     source_only=True
+# )
+#
+# run_eval(
+#     model_class=SingleDomainModel,
+#     model_params={
+#         "use_KL": True,
+#         "risk_lambda": 1e-3
+#     },
+#     filename="standard_eval/NN_KL_source_only.json",
+#     labelled_prop_list=[0.1],
+#     num_exps=1,
+#     src_domains=1,
+#     source_only=True
+# )
+#
+# run_eval(
+#     model_class=DANNKLModel,
+#     model_params={
+#         "use_KL": True,
+#         "risk_lambda": 1e-3,
+#         "rep_lambda": 1e-1
+#     },
+#     filename="standard_eval/DANN_KL_3src.json",
+#     labelled_prop_list=[0.1, 0.3],
+#     num_exps=3,
+#     src_domains=3,
+#     standard_eval=True
+# )
+
+
+# run_eval(
+#     model_class=DANNKLModel,
+#     model_params={
+#         "use_KL": True,
+#         "risk_lambda": 1e-3,
+#         "rep_lambda": 1e-1
+#     },
+#     filename="standard_eval/DANN_KL_3src.json",
+#     labelled_prop_list=[0.1, 0.3],
+#     num_exps=3,
+#     src_domains=3
+# )
+
+
+
+
+

@@ -9,8 +9,7 @@ def build_encoder():
     return model
 
 
-def build_classifier(input_shape, classes, joint=True):
-    domains = 2 if joint else 1
+def build_classifier(input_shape, classes, domains):
 
     classifier = nn.Sequential(
         nn.Linear(input_shape, 1280),
@@ -19,17 +18,18 @@ def build_classifier(input_shape, classes, joint=True):
         nn.Linear(1280, 1280),
         nn.ReLU(True),
         nn.Dropout(0.2),
-        nn.Linear(1280, domains * classes)
+        nn.Linear(1280, domains * classes),
+        nn.LogSoftmax(dim=1)
     )
     return classifier
 
 
-def build_discriminator(input_shape):
+def build_discriminator(input_shape, domains):
     discriminator = nn.Sequential(
         nn.Linear(input_shape, 1280),
         nn.ReLU(True),
         nn.Linear(1280, 1280),
         nn.ReLU(True),
-        nn.Linear(1280, 1)
+        nn.Linear(1280, domains)
     )
     return discriminator
