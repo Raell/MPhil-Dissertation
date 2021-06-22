@@ -1,9 +1,6 @@
-import torch
-import torch.optim as optim
-import numpy as np
-from collections import defaultdict
-import copy
+from itertools import chain
 
+import torch
 import torchmetrics
 from torch import nn
 
@@ -11,7 +8,7 @@ from models.base_model import BaseModel
 from models.builder import build_discriminator
 from util.kl_loss import KL_Loss
 from util.reverse_layer import ReverseLayer
-from itertools import chain
+
 
 class DANNModel(BaseModel):
     def __init__(

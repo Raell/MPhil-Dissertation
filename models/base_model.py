@@ -1,13 +1,10 @@
-import copy
-import numpy as np
+import pytorch_lightning as pl
 import torch
 import torch.nn as nn
-import torch.optim as optim
-from collections import defaultdict
 import torchmetrics
+
 from models.builder import build_encoder, build_classifier
 from util.kl_loss import KL_Loss
-import pytorch_lightning as pl
 
 
 class BaseModel(pl.LightningModule):
