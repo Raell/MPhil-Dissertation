@@ -8,3 +8,12 @@ The `util` folder contains utility functions that are used in the other parts of
 The `experiments` folder contains code that runs the experiments seen in the project.
 
 The `results` folder contains the results from previous experiments runs.
+
+### List of dependencies:
+`tqdm`
+`json`
+`numpy`
+`torch`
+`torchmetrics`
+`torchvision`
+`pytorch-lightning`
