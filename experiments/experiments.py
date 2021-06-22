@@ -1,29 +1,23 @@
 import argparse
 import itertools
 import json
+import logging
 import os
 import re
-import shutil
 from collections import defaultdict
 from typing import Any, Dict, Optional, Union
 
 import numpy as np
 import torch
-from torchsummary import summary
-from pytorch_lightning.callbacks import ProgressBar, ModelCheckpoint, EarlyStopping
+from pytorch_lightning.callbacks import ProgressBar, EarlyStopping
 from pytorch_lightning.loggers import LightningLoggerBase
 from torch.utils.data import DataLoader, ConcatDataset
 from tqdm import tqdm
-
-import logging
-
-from models.kl_model import KLModel, DANNKLModel
 
 logging.getLogger("lightning").addHandler(logging.NullHandler())
 logging.getLogger("lightning").propagate = False
 
 from models.DANN import DANNModel
-from models.base_model import SingleDomainModel
 import pytorch_lightning as pl
 
 from util.data import DataGenerator, Dataset
@@ -34,7 +28,7 @@ DOMAIN_FOLDERS = {d: os.path.join(DATA_FOLDER, d) for d in DOMAINS}
 
 
 class MetricsLogger(LightningLoggerBase):
-
+    # Logger for extracting metrics from model
     def __init__(self):
         super().__init__()
         self.metrics = {
@@ -66,7 +60,7 @@ class MetricsLogger(LightningLoggerBase):
 
 
 class LitProgressBar(ProgressBar):
-
+    # Removes progress bar update due to visual bug in validation
     def init_validation_tqdm(self):
         bar = tqdm(
             disable=True,
@@ -75,6 +69,7 @@ class LitProgressBar(ProgressBar):
 
 
 class ZipDataset(torch.utils.data.Dataset):
+    # Class for merging data with labels into Dataset
     def __init__(self, data, labels):
         self.data = data
         self.labels = labels
@@ -87,6 +82,7 @@ class ZipDataset(torch.utils.data.Dataset):
 
 
 def train_model(model, train, val, test, min_epochs=30, max_epochs=100, eval=True, patience=3):
+    # Function for training model and returning predictions or test results
     logger = MetricsLogger()
     pbar = LitProgressBar()
 
@@ -115,9 +111,11 @@ def train_model(model, train, val, test, min_epochs=30, max_epochs=100, eval=Tru
 
 
 class Results:
+    # Framework for saving results in json format
     def __init__(self, filename):
         self.filename = filename
 
+        # Load existing file if available
         if os.path.isfile(filename):
             with open(filename) as json_file:
                 self.metrics = defaultdict(dict, json.load(json_file))
@@ -130,6 +128,7 @@ class Results:
         self.metrics = new_data
 
     def save(self):
+        # Saves to json file
         with open(self.filename, "w") as fp:
             json.dump(self.metrics, fp, indent="\t")
 
@@ -143,9 +142,11 @@ def run_experiments(
         return_preds=False,
         patience=3
 ):
+    # Train and evaluate models
     model = model_class(**model_params)
     results = train_model(model, train, val, test, eval=not return_preds, patience=patience)
 
+    # Returns either predicted labels or test results
     if return_preds:
         if model_class == DANNModel:
             results = [p[0] for p in results]
@@ -159,22 +160,25 @@ def run_experiments(
 
 
 def eval_KL(
-    model_class,
-    model_params,
-    train,
-    val,
-    test,
-    patience=3
+        model_class,
+        model_params,
+        train,
+        val,
+        test,
+        patience=3
 ):
+    # Train and evaluate model for KL loss test
+
+    # Base model training
     is_DANN = model_class == DANNModel
     if not is_DANN:
         train_set = train[0]
     params = dict(model_params)
     model = model_class(**params)
     _ = train_model(model, train_set, val, test, patience=patience)
+
+    # Freeze encoder and train a new joint classifier
     encoder_params = model.encoder.state_dict()
-
-
     params["use_KL"] = True
     params["kl_eval"] = True
     kl_model = model_class(**params)
@@ -184,6 +188,7 @@ def eval_KL(
 
     results = train_model(kl_model, train, val, test, patience=patience)
     return results
+
 
 def run_eval_KL(
         model_class,
@@ -195,7 +200,7 @@ def run_eval_KL(
         main_header="",
         sub_header=""
 ):
-    # is_DANN = model_class == DANNModel
+    # Runs KL loss evaluation
 
     full_metrics = defaultdict(dict, results.metrics)
     metrics = defaultdict(dict, full_metrics[main_header])
@@ -211,7 +216,7 @@ def run_eval_KL(
             continue
 
         # Load datasets
-        datasets = data.get_TCV(target_labels=target_labels)
+        datasets = data.get_datasets(target_labels=target_labels)
         src_train, src_test, tar_label, tar_nlabel, tar_test = datasets
 
         # Prepare dataloaders
@@ -220,12 +225,8 @@ def run_eval_KL(
         train_label_loader = prepare_loader(train, is_train=True)
         val_loader = prepare_loader(val, is_train=False)
 
-        # if is_DANN:
         train_nlabel_loader = prepare_loader(tar_nlabel, is_train=True)
         train_loader = [train_label_loader, train_nlabel_loader]
-        #
-        # else:
-        # train_loader = train_label_loader
 
         test_loader = prepare_loader(tar_test, is_train=False)
 
@@ -238,12 +239,14 @@ def run_eval_KL(
             test_loader,
         )
 
+        # Saves results
         full_metrics[main_header] = metrics
-
         results.update(full_metrics)
         results.save()
 
+
 def get_cross_product(d):
+    # Returns all possible cross-product of dictionary keys
     pairs = d.items()
     keys = [k for k, _ in pairs]
     vals = [v for _, v in pairs]
@@ -254,6 +257,7 @@ def get_cross_product(d):
 
 
 def prepare_loader(dataset, is_train=False):
+    # Returns dataloader from dataset
     return DataLoader(
         dataset=dataset,
         batch_size=64,
@@ -262,6 +266,7 @@ def prepare_loader(dataset, is_train=False):
 
 
 def split_data(data, split, seed=None):
+    # Splits dataset into 2 proportioned subsets
     split1, split2 = torch.utils.data.random_split(
         data,
         [
@@ -285,6 +290,8 @@ def run_standard_val(
         labeled_target_only=False,
         source_only=False
 ):
+    # Performs standard evaluation of model
+
     is_DANN = model_class == DANNModel
     use_KL = model_params["use_KL"]
 
@@ -294,6 +301,7 @@ def run_standard_val(
     for i in range(num_exps):
         print(f"{main_header}, {sub_header}, Experiment {i + 1}")
 
+        # Skips experiment if already recorded
         if (
                 main_header in full_metrics and
                 sub_header in full_metrics[main_header] and
@@ -302,7 +310,7 @@ def run_standard_val(
             continue
 
         # Load datasets
-        datasets = data.get_TCV(target_labels=target_labels)
+        datasets = data.get_datasets(target_labels=target_labels)
         src_train, src_test, tar_label, tar_nlabel, tar_test = datasets
 
         # Prepare dataloaders
@@ -342,6 +350,7 @@ def run_standard_val(
         results.update(full_metrics)
         results.save()
 
+
 def run_reverse_val(
         model_class,
         model_params,
@@ -363,20 +372,15 @@ def run_reverse_val(
         print(f"{main_header}, {sub_header}, Experiment {i + 1}")
 
         if (
-            main_header in full_metrics and
-            sub_header in full_metrics[main_header] and
-            f"Experiment {i + 1}" in full_metrics[main_header][sub_header]
+                main_header in full_metrics and
+                sub_header in full_metrics[main_header] and
+                f"Experiment {i + 1}" in full_metrics[main_header][sub_header]
         ):
             continue
 
         # Load datasets
-        datasets = data.get_TCV(target_labels=target_labels)
+        datasets = data.get_datasets(target_labels=target_labels)
         src_train, src_test, tar_label, tar_nlabel, tar_test = datasets
-
-        # if eval:
-        #     src_train, src_test, tar_label, tar_nlabel, tar_test = datasets
-        # else:
-        #     src_train, src_test, tar_label, tar_nlabel = datasets
 
         # Prepare dataloaders
         train_label_loader = prepare_loader(src_train, is_train=True)
@@ -400,6 +404,7 @@ def run_reverse_val(
             return_preds=True
         )
 
+        # Repeat process for reverse classifier using predicted labels
         preds = torch.Tensor([(data.domains - 1, pred) for pred in np.argmax(preds, axis=1)]).long()
 
         # Prepare dataloaders
@@ -421,7 +426,8 @@ def run_reverse_val(
         else:
             test_loader = prepare_loader(src_test, is_train=False)
 
-        metrics[sub_header][f"Experiment {i+1}"] = run_experiments(
+        # Run target training and evaluate on source
+        metrics[sub_header][f"Experiment {i + 1}"] = run_experiments(
             model_class,
             model_params,
             train_loader,
@@ -429,10 +435,11 @@ def run_reverse_val(
             test_loader
         )
 
+        # Saves results
         full_metrics[main_header] = metrics
-
         results.update(full_metrics)
         results.save()
+
 
 def hyperparam_search(
         model_class,
@@ -442,8 +449,9 @@ def hyperparam_search(
         src_domains=1,
         num_exps=1
 ):
-    results = Results(filename)
+    # Runs hyperparameter search using reverse validation
 
+    results = Results(filename)
     domains_combo = domain_combo(src_domains)
 
     for src, target in domains_combo:
@@ -477,7 +485,9 @@ def hyperparam_search(
                 sub_header=sub_header
             )
 
+
 def domain_combo(src_domains):
+    # Loads all src/tar domain combinations with fixed number of src domains
     combo = []
     if src_domains == 1:
         for s in DOMAINS:
@@ -497,6 +507,7 @@ def domain_combo(src_domains):
             combo.append(([d for d in DOMAINS if d != t], t))
     return combo
 
+
 def run_eval(
         model_class,
         model_params,
@@ -509,9 +520,12 @@ def run_eval(
         source_only=False,
         kl_eval=False
 ):
+    # Runs experimental setup
+
     results = Results(filename)
     domains_combo = domain_combo(src_domains)
 
+    # Testing on all src/tar domain combinations
     for src, target in domains_combo:
         src_folder = [DOMAIN_FOLDERS[s] for s in src]
         target_folder = [DOMAIN_FOLDERS[target]]
@@ -528,6 +542,8 @@ def run_eval(
 
         for p in labelled_prop_list:
             sub_header = f"{int(p * 100)}% labels"
+
+            # Runs KL loss evaluation
             if kl_eval:
                 run_eval_KL(
                     model_class,
@@ -539,6 +555,7 @@ def run_eval(
                     sub_header=sub_header
                 )
 
+            # Runs standard evaluation
             elif standard_eval:
                 run_standard_val(
                     model_class,
@@ -552,6 +569,8 @@ def run_eval(
                     labeled_target_only=labeled_target_only,
                     source_only=source_only
                 )
+
+            # Runs reverse validation evaluation
             else:
                 run_reverse_val(
                     model_class,
@@ -564,161 +583,3 @@ def run_eval(
                     main_header=main_header,
                     sub_header=sub_header
                 )
-
-run_eval(
-    model_class=SingleDomainModel,
-    model_params={
-        "use_KL": False,
-        "risk_lambda": 1e-3
-    },
-    filename="kl_study/NN.json",
-    labelled_prop_list=[0.1, 0.3],
-    num_exps=1,
-    src_domains=1,
-    kl_eval=True
-)
-
-
-# hyperparam_search(
-#     DANNModel,
-#     model_params={
-#         "use_KL": False,
-#     },
-#     param_search_dict={
-#         "lr": [1e-6, 1e-2]
-#     },
-#     filename=f"hyperparam_search/lr_search.json"
-# )
-#
-# hyperparam_search(
-#     DANNModel,
-#     model_params={
-#         "use_KL": False
-#     },
-#     param_search_dict={
-#         "rep_lambda": [0.001, 10]
-#     },
-#     filename=f"hyperparam_search/DANN_search.json"
-# )
-
-# hyperparam_search(
-#     SingleDomainModel,
-#     model_params={
-#         "use_KL": True,
-#     },
-#     param_search_dict={
-#         "risk_lambda": [1e-5, 1e-1]
-#     },
-#     filename=f"hyperparam_search/NN_KL_search.json"
-# )
-
-# hyperparam_search(
-#     DANNModel,
-#     model_params={
-#         "use_KL": True,
-#     },
-#     param_search_dict={
-#         "risk_lambda": [1e-4, 1e-3, 1e-2],
-#         "rep_lambda": [1e-2, 1e-1, 1]
-#     },
-#     filename=f"DANN_KL_search.json"
-# )
-
-
-# run_eval(
-#     model_class=DANNModel,
-#     model_params={
-#         "use_KL": False,
-#         "rep_lambda": 1e-1
-#     },
-#     filename="DANN.json",
-#     labelled_prop_list=[0.1, 0.3],
-#     num_exps=3,
-#     src_domains=1
-# )
-
-# run_eval(
-#     model_class=DANNModel,
-#     model_params={
-#         "use_KL": True,
-#         "risk_lambda": 1e-3,
-#         "rep_lambda": 1e-1
-#     },
-#     filename="TCV_eval/DANN_KL.json",
-#     labelled_prop_list=[0.1, 0.3],
-#     num_exps=3,
-#     src_domains=1,
-#     standard_eval=False
-# )
-
-# run_eval(
-#     model_class=DANNModel,
-#     model_params={
-#         "use_KL": False,
-#         "rep_lambda": 1e-1
-#     },
-#     filename="standard_eval/DANN_3src.json",
-#     labelled_prop_list=[0.1, 0.3],
-#     num_exps=3,
-#     src_domains=3,
-#     standard_eval=True
-# )
-
-
-# run_eval(
-#     model_class=SingleDomainModel,
-#     model_params={
-#         "use_KL": False
-#     },
-#     filename="standard_eval/NN_source_only.json",
-#     labelled_prop_list=[0.1],
-#     num_exps=1,
-#     src_domains=1,
-#     source_only=True
-# )
-#
-# run_eval(
-#     model_class=SingleDomainModel,
-#     model_params={
-#         "use_KL": True,
-#         "risk_lambda": 1e-3
-#     },
-#     filename="standard_eval/NN_KL_source_only.json",
-#     labelled_prop_list=[0.1],
-#     num_exps=1,
-#     src_domains=1,
-#     source_only=True
-# )
-#
-# run_eval(
-#     model_class=DANNKLModel,
-#     model_params={
-#         "use_KL": True,
-#         "risk_lambda": 1e-3,
-#         "rep_lambda": 1e-1
-#     },
-#     filename="standard_eval/DANN_KL_3src.json",
-#     labelled_prop_list=[0.1, 0.3],
-#     num_exps=3,
-#     src_domains=3,
-#     standard_eval=True
-# )
-
-
-# run_eval(
-#     model_class=DANNKLModel,
-#     model_params={
-#         "use_KL": True,
-#         "risk_lambda": 1e-3,
-#         "rep_lambda": 1e-1
-#     },
-#     filename="standard_eval/DANN_KL_3src.json",
-#     labelled_prop_list=[0.1, 0.3],
-#     num_exps=3,
-#     src_domains=3
-# )
-
-
-
-
-

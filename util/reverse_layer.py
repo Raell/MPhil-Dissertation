@@ -1,6 +1,8 @@
 from torch.autograd import Function
 
+
 class ReverseLayer(Function):
+    # Gradient reversal layer for DANN implementation
     @staticmethod
     def forward(ctx, x, alpha):
         ctx.alpha = alpha
