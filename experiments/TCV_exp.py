@@ -1,6 +1,9 @@
+import sys
+sys.path.append('..')
+
 from models.DANN import DANNModel
 from models.base_model import BaseModel
-from experiments.experiments import run_eval
+from experiments import run_eval
 
 # Run experiments for evaluation using reverse validation
 run_eval(

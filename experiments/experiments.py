@@ -6,6 +6,8 @@ import os
 import re
 from collections import defaultdict
 from typing import Any, Dict, Optional, Union
+import sys
+sys.path.append('..')
 
 import numpy as np
 import torch

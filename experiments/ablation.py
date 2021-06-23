@@ -1,5 +1,8 @@
+import sys
+sys.path.append('..')
+
 from models.base_model import BaseModel
-from experiments.experiments import run_eval
+from experiments import run_eval
 
 
 # Run ablation on source only and labelled target only experiments

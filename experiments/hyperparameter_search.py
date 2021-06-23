@@ -1,4 +1,7 @@
-from experiments.experiments import hyperparam_search
+import sys
+sys.path.append('..')
+
+from experiments import hyperparam_search
 from models.DANN import DANNModel
 from models.base_model import BaseModel
 

@@ -1,4 +1,7 @@
-from experiments.experiments import run_eval
+import sys
+sys.path.append('..')
+
+from experiments import run_eval
 from models.DANN import DANNModel
 from models.base_model import BaseModel
 
